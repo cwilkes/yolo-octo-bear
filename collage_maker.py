@@ -1,6 +1,11 @@
 import sys
 from collections import defaultdict, Counter
 import math
+import random
+
+random.seed(1)
+
+SCORE_UNPLACED = 200000
 
 
 def lgi(msg, *args):
@@ -77,7 +82,7 @@ class Board(object):
         try:
             tile = self.tiles[tile_pos]
         except:
-            raise Exception('Asking for tile_pos %d in array size %d' % (tile_pos, len(self.tiles)))
+            raise Exception('Asking for tile_pos %r in array size %r' % (tile_pos, len(self.tiles)))
         prev = repr(tile)
         tile.move(top_col, top_row)
         if width is not None:
@@ -98,6 +103,12 @@ class Board(object):
         for tile in self.tiles:
             ret.extend(tile.as_ary())
         return ret
+
+    def dim(self, tile_id):
+        return self.tiles[tile_id].dim()
+
+    def coord(self, tile_id):
+        return self.tiles[tile_id].coord()
 
     def row_count(self):
         # should make more efficient
@@ -334,13 +345,22 @@ def classify_image(data, offsets=None):
     colors_pos = 0
     total_color_count = 0
     for row_min, row_max in ((row_start, min_row), (min_row, row_end)):
-        for col_min, col_max in ((col_start, min_col), (min_col, col_end)):
-            for row in data[row_min:row_max]:
-                for val in row[col_min:col_max]:
-                    colors[colors_pos] += val
-            total_color_count += colors[colors_pos]
-            colors[colors_pos] /= (row_max-row_min)*(col_max-col_min)
-            colors_pos += 1
+        col_min, col_max = col_start, min_col
+        for row in data[row_min:row_max]:
+            for val in row[col_min:col_max]:
+                colors[colors_pos] += val
+        total_color_count += colors[colors_pos]
+        colors[colors_pos] /= (row_max-row_min)*(col_max-col_min)
+        colors_pos += 1
+    for col_min, col_max in ((col_start, min_col), (min_col, col_end)):
+        row_min, row_max = row_start, min_row
+        for row in data[row_min:row_max]:
+            for val in row[col_min:col_max]:
+                colors[colors_pos] += val
+        total_color_count += colors[colors_pos]
+        colors[colors_pos] /= (row_max-row_min)*(col_max-col_min)
+        colors_pos += 1
+
     size = (col_end-col_start)*(row_end-row_start)
     avg = total_color_count / size
     return avg, colors
@@ -355,59 +375,92 @@ def compare_ci(img1_ci, img2_ci):
 
 
 def classify_large_image(data, width, height):
-    info = defaultdict(dict)
+    info = dict()
     for row in range(0, len(data)-height, height):
         for col in range(0, len(data[0])-width, width):
             ci = classify_image(data, offsets=(col, col+width, row, row+height))
-            info[row][col] = ci
+            info[(col, row)] = ci
     return info
 
 
-def match_by_ci(board, lci, small_cis):
-    matches = dict()
-    free_tiles = dict()
-    for tile in board.tiles:
-        free_tiles[tile.index] = tile
-    ending_col, ending_row = 0, 0
-    by_img = dict()
-    for img_index, img_ci in small_cis.items():
-        best_key, best_score = None, sys.maxint
-        for row in lci.keys():
-            for col, ci in lci[row].items():
-                key = col, row
-                if key in matches:
-                    continue
-                comp = compare_ci(ci, img_ci)
-                if comp < best_score:
-                    best_key, best_score = key, comp
-        if best_key is None:
-            break
-        matches[best_key] = img_index, best_score
-        by_img[img_index] = best_key[0], best_key[1], best_score
-        free_tiles.pop(img_index)
-        img = board.place(img_index, best_key[0], best_key[1], log=True)
-        ending_col = max(ending_col, best_key[0]+img.width)
-        ending_row = max(ending_row, best_key[1] + img.height)
-    # for now just go back through the end to the beginning
-    for img_index, img_ci in reversed(small_cis.items()):
-        try:
-            cur_col, cur_row, cur_score = by_img[img_index]
-        except:
-            cur_col, cur_row, cur_score = -1, -1, 0
-        for row in lci.keys():
-            for col, ci in lci[row].items():
-                key = col, row
-                existing = matches[key]
-                new_score_a = compare_ci(ci, img_ci)
-                new_score_b = compare_ci(ci, )
+class ImageClassifier(object):
+    def __init__(self, board, source_image, images, width, height):
+        self.board = board
+        self.source_image = source_image
+        self.width, self.height = width, height
+        self.source_image_class = classify_large_image(source_image.data, width, height)
+        self.image_classes = list()
+        for img in images:
+            self.image_classes.append(classify_image(img.data))
+        self.image_board_score = defaultdict(dict)
+        self.total_score = 0
 
-                if comp < best_score:
-                    best_key, best_score = key, comp
-        if best_key is None:
-            break
-        matches[best_key] = img_index
-        free_tiles.pop(img_index)
-        img = board.place(img_index, best_key[0], best_key[1], log=True)
+    def _get_score(self, img_id):
+        dim1_col, dim1_row = self.board.coord(img_id)
+        if dim1_col == -1:
+            return SCORE_UNPLACED
+        else:
+            if img_id not in self.image_board_score[(dim1_col, dim1_row)]:
+                score = compare_ci(self.source_image_class[(dim1_col, dim1_row)], self.image_classes[img_id])
+                self.image_board_score[(dim1_col, dim1_row)][img_id] = score
+            return self.image_board_score[(dim1_col, dim1_row)][img_id]
+
+    def _check_swap(self, img1, img2):
+        score1_pre, score2_pre = self._get_score(img1), self._get_score(img2)
+        self.board.swap(img1, img2)
+        score1_post, score2_post = self._get_score(img1), self._get_score(img2)
+        delta_score = (score1_pre + score2_pre) - (score1_post + score2_post)
+        if delta_score > 0:
+            # good move, adjust total score
+            lgi('Good move with ids %r and %r, pre: (%d,%d), post: (%d,%d) => %d', img1, img2, score1_pre, score2_pre, score1_post, score2_post, delta_score)
+            self.total_score -= delta_score
+        else:
+            # revert
+            self.board.swap(img1, img2)
+
+    def _get_random_image_ids(self):
+        ids = list(range(0, len(self.image_classes)))
+        random.shuffle(ids)
+        return ids
+
+    def match(self):
+        ids = self._get_random_image_ids()
+        lgi('Randomly placing images')
+        number_rows, number_cols = 0, 0
+        for row in range(0, self.source_image.height-self.height, self.height):
+            for col in range(0, self.source_image.width-self.width, self.width):
+                if number_rows == 0:
+                    number_cols += 1
+                img_id = ids.pop(0)
+                x = self.source_image_class[(col, row)]
+                y = self.image_classes[img_id]
+                score = compare_ci(x, y)
+                self.board.place(img_id, col, row, log=True)
+                self.image_board_score[(col, row)][img_id] = score
+                self.total_score += score
+            number_rows += 1
+        lgi('Initial score: %r', self.total_score)
+        for t in range(10):
+            ids = self._get_random_image_ids()
+            cur_score = self.total_score
+            while len(ids) >= 2:
+                id1, id2 = ids.pop(0), ids.pop(0)
+                self._check_swap(id1, id2)
+            lgi('Initial score: %r', self.total_score)
+            if cur_score == self.total_score:
+                break
+
+
+def get_free_tiles(board):
+    free_tiles = list()
+    ending_col, ending_row = 0, 0
+    for tile in board.tiles:
+        box = tile.box()
+        if box[0] is None:
+            free_tiles.append(tile)
+        else:
+            ending_col = max(ending_col, box[2]+1)
+            ending_row = max(ending_row, box[3]+1)
     return free_tiles, ending_col, ending_row
 
 
@@ -419,149 +472,10 @@ def do_work(source_image, images):
     min_width, min_height = int(min_width / 1.5), int(min_height / 1.5)
     lgi('Min width, height: (%d,%d)', min_width, min_height)
     scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
-    img_classifications = dict()
-    for img in scaled_images:
-        ci = classify_image(img.data)
-        lgi('small class, %r : %r', img, ci)
-        img_classifications[img.index] = ci
-    lci = classify_large_image(source_image.data, min_width, min_height)
-    free_tiles, ending_col, ending_row = match_by_ci(board, lci, img_classifications)
-    fill_sides(board, free_tiles.values(), ending_col, ending_row)
-    return board.as_ary()
-
-
-def do_work_old2(source_image, images):
-    board = Board(source_image, images)
-    num_nodes = 7
-    width = source_image.width / num_nodes + 1
-    height = source_image.height / num_nodes + 1
-    scaled_images = list()
-    for tile_pos in range(len(board.tiles)):
-        scaled_images.append(board.place(tile_pos, -1, -1, width, height))
-    thresholds = [255/3, 2*255/3]
-    board_scores = board.threshold_scoring(width, height, thresholds)
-    scaled_images_scores = [img.threshold_scoring(thresholds) for img in scaled_images]
-    comp = list()
-    for img_scores in scaled_images_scores:
-        c2 = list()
-        for row, col, board_score2 in board_scores:
-            score = 0
-            for a, b in zip(img_scores, board_score2):
-                score += (a-b)*(a-b)
-            c2.append(score)
-        comp.append(c2)
-    used_images, used_board = set(), set()
-    ending_col, ending_row = 0, 0
-    while len(used_images) < len(board_scores):
-        min_img_pos, min_board_pos, min_score = None, None, sys.maxint
-        for img_pos, c2 in enumerate(comp):
-            if img_pos in used_images:
-                continue
-            for board_pos, val in enumerate(c2):
-                if board_pos in used_board:
-                    continue
-                if val < min_score:
-                    min_img_pos, min_board_pos, min_score = img_pos, board_pos, val
-        if min_img_pos is None:
-            break
-        c, r, score = board_scores[min_board_pos]
-        ending_col = max(ending_col, c)
-        ending_row = max(ending_row, r)
-        board.place(min_img_pos, c, r, log=True)
-        used_images.add(min_img_pos)
-        used_board.add(min_board_pos)
-    lgi('Used images: (%d): %s', len(used_images), sorted(used_images))
-    lgi('Used board: (%d): %s', len(used_board), sorted(used_board))
-    # fill in sides
-    free_tiles = list()
-    for tile in board.tiles:
-        if not tile.placed():
-            free_tiles.append(tile)
-    row = 0
-    ending_col += width
-    ending_row += height
-    lgi('Filling in right col %r', ending_col)
-    while row < source_image.height:
-        tile = free_tiles.pop(0)
-        img = tile._image
-        h = min(img.height, source_image.height-row)
-        board.place(tile._image.index-1, ending_col, row, source_image.width-ending_col, h, True)
-        row += h
-    col = 0
-    lgi('Filling in bottom row %r', ending_row)
-    while col < ending_col:
-        tile = free_tiles.pop(0)
-        img = tile._image
-        w = min(img.width, ending_col-col)
-        board.place(tile._image.index-1, col, ending_row, w, source_image.height-ending_row, True)
-        col += w
-    simulated_annealing(board, 7)
-    simulated_annealing(board, -7)
-    simulated_annealing(board, 6)
-    simulated_annealing(board, -6)
-    simulated_annealing(board, 5)
-    simulated_annealing(board, -5)
-    return board.as_ary()
-
-
-def do_work_old(source_image, images):
-    board = Board(source_image, images)
-    num_nodes = 14
-    width = source_image.width / num_nodes + 1
-    height = source_image.height / num_nodes + 1
-    row = 0
-    col = 0
-    index = 0
-    lgi('Width: %d, height: %d', width, height)
-    ending_col, ending_row = None, -1
-    while row < source_image.height and index < len(images):
-        img = board.tiles[index]._image
-        if img.width < width or img.height < height:
-            lgi('Not placing image %s as smaller than (%d,%d)', img, width, height)
-            index += 1
-            continue
-        w = width
-        if col + w > source_image.width:
-            ending_col = col
-            index += 1
-            col = 0
-            row += h
-            continue
-        h = height
-        if row + h > source_image.height:
-            break
-        board.place(index, col, row, w, h)
-        ending_row = max(ending_row, row)
-        col += w
-        index += 1
-    lgi('Now filling in with index %d ending_col %r, ending_row %r', index, ending_col, ending_row)
-    row = 0
-    while row < source_image.height:
-        img = board.tiles[index]._image
-        h = min(img.height, source_image.height-row)
-        board.place(index, ending_col, row, source_image.width-ending_col, h, True)
-        row += h
-        index += 1
-    col = 0
-    ending_row += height
-    while col < ending_col:
-        img = board.tiles[index]._image
-        w = min(img.width, ending_col-col)
-        board.place(index, col, ending_row, w, source_image.height-ending_row, True)
-        col += w
-        index += 1
-    lgi('Done with initial placement')
-    # now rescale all their image sizes
-    if False:
-        simulated_annealing(board, 8)
-        simulated_annealing(board, -8)
-        simulated_annealing(board, 4)
-        simulated_annealing(board, -4)
-        simulated_annealing(board, 2)
-        simulated_annealing(board, -2)
-    for score in board.threshold_scoring(22, 17, [85, 170]):
-        lgi('Score: %s', score)
-
+    ic = ImageClassifier(board, source_image, images, min_width, min_height)
+    ic.match()
+    free_tiles, ending_col, ending_row = get_free_tiles(board)
+    fill_sides(board, free_tiles, ending_col, ending_row)
     return board.as_ary()
 
 
