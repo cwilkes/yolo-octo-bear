@@ -2,11 +2,13 @@ import sys
 from collections import defaultdict, Counter
 import math
 import random
+import datetime
+
 
 random.seed(1)
 
 SCORE_UNPLACED = 200000
-
+MAX_MILLIS = 9 * 1000 * 1000
 
 def lgi(msg, *args):
     print >>sys.stderr, msg % args
@@ -327,10 +329,44 @@ def fill_sides(board, free_tiles, ending_col, ending_row):
 def bit_count(int_type):
     count = 0
     while int_type:
-            int_type &= int_type - 1
-            count += 1
+        int_type &= int_type - 1
+        count += 1
     return count
 
+
+def image_histo_around(img):
+    normal = image_histo(img.data)
+    half_size = Counter()
+    for r in range(0, len(img.data)-1, 2):
+        for c in range(0, len(img.data[0])-1, 2):
+            col = img.data[r][c]
+            col += img.data[r][c+1]
+            col += img.data[r+1][c]
+            col += img.data[r+1][c+1]
+            half_size[col/4] += 1
+    for color in half_size.keys():
+        half_size[color] = 40000 * c[color] / (len(img.data)*len(img.data[0]))
+    return normal, half_size
+
+
+def image_histo(data):
+    c = Counter()
+    for row in data:
+        for val in row:
+            c[val] += 1
+    for color in c.keys():
+        c[color] = 10000 * c[color] / (len(data)*len(data[0]))
+    return c
+
+
+def image_histo_offsets(data, offsets):
+    c = Counter()
+    for row in data[offsets[2]:offsets[3]]:
+        for val in row[offsets[0]:offsets[1]]:
+            c[val] += 1
+    for color in c.keys():
+        c[color] = 10000 * c[color] / (len(data)*len(data[0]))
+    return c
 
 def classify_image(data, offsets=None):
     if offsets:
@@ -383,8 +419,34 @@ def classify_large_image(data, width, height):
     return info
 
 
+def histo_large_image(data, width, height, overall_histo):
+    info = dict()
+    o_o = [_[0] for _ in overall_histo]
+    for row in range(0, len(data)-height, height):
+        for col in range(0, len(data[0])-width, width):
+            hi = image_histo_offsets(data, offsets=(col, col+width, row, row+height))
+            #lgi('At (%d,%d) histo: %r', col, row, list(hi.most_common()))
+            cume = 0
+            ret = list()
+            my_colors = sorted(hi.keys())
+            tot = 0
+            for top_end in o_o:
+                #lgi('Working on top end %r with %r', top_end, my_colors)
+                while my_colors and my_colors[0] <= top_end:
+                    cume += hi[my_colors.pop(0)]
+                ret.append(cume)
+                tot += cume
+                cume = 0
+            if cume != 0:
+                raise Exception('Cume should be zero not %d' % (cume, ))
+            info[(col, row)] = [(100*_+50) / tot for _ in ret]
+            lgi('Histo at (%d,%d) : %r', col, row, info[(col, row)])
+    return info
+
+
 class ImageClassifier(object):
-    def __init__(self, board, source_image, images, width, height):
+    def __init__(self, board, source_image, images, width, height, start_time):
+        self.start_time = start_time
         self.board = board
         self.source_image = source_image
         self.width, self.height = width, height
@@ -394,6 +456,10 @@ class ImageClassifier(object):
             self.image_classes.append(classify_image(img.data))
         self.image_board_score = defaultdict(dict)
         self.total_score = 0
+
+    def delta(self):
+        dt = datetime.datetime.now() - self.start_time
+        return 1000*1000*dt.seconds + dt.microseconds
 
     def _get_score(self, img_id):
         dim1_col, dim1_row = self.board.coord(img_id)
@@ -422,6 +488,36 @@ class ImageClassifier(object):
         ids = list(range(0, len(self.image_classes)))
         random.shuffle(ids)
         return ids
+
+    def match2(self, overall_histo, per_image_histo, width, height):
+        sic = histo_large_image(self.source_image.data, self.width, self.height, overall_histo)
+        locales = list(sic.keys())
+        for img_index, histo in enumerate(per_image_histo):
+            for key, bank in sic.items():
+                tot = 0
+                for a, b in zip(histo, bank):
+                    tot += (a-b)**2
+                self.image_board_score[key][img_index] = tot
+            if locales:
+                placed = locales.pop(0)
+                self.board.place(img_index, placed[0], placed[1], width, height, log=True)
+                self.total_score += tot
+        lgi('Initial score: %r', self.total_score)
+        for t in range(30):
+            delta_time = self.delta()
+            if delta_time > MAX_MILLIS:
+                lgi('Breaking as time: %r', delta_time)
+                break
+            ids = self._get_random_image_ids()
+            cur_score = self.total_score
+            while len(ids) >= 2:
+                id1, id2 = ids.pop(0), ids.pop(0)
+                self._check_swap(id1, id2)
+            lgi('Score at round %d: %r', t, self.total_score)
+            if cur_score == self.total_score:
+                break
+        lgi('Final score: %r', self.total_score)
+        lgi('Total time: %r', self.delta() / 1000)
 
     def match(self):
         ids = self._get_random_image_ids()
@@ -464,16 +560,54 @@ def get_free_tiles(board):
     return free_tiles, ending_col, ending_row
 
 
+def bucketize_histograms(images):
+    ret1 = list()
+    all_colors = Counter()
+    for img in images:
+        c = image_histo(img.data)
+        ret1.append(c)
+        all_colors += c
+    total_count = 0
+    for color, count in all_colors.items():
+        total_count += count
+    delta = total_count / 8
+    ret = list()
+    cume = 0
+    for color in sorted(all_colors.keys()):
+        cume += all_colors[color]
+        if cume >= delta:
+            ret.append((color, cume))
+            cume = 0
+    ret.append((color, cume))
+    if color != 255:
+        ret.append((255, cume))
+    per_image = list()
+    for c in ret1:
+        my_colors = sorted(c.keys())
+        foo = list()
+        for color in (_[0] for _ in ret):
+            cur = 0
+            while my_colors and my_colors[0] <= color:
+                cur += c[my_colors.pop(0)]
+            foo.append((cur+50)/100)
+        per_image.append(foo)
+    return ret, per_image
+
+
 def do_work(source_image, images):
+    start_time = datetime.datetime.now()
+    overall_histo, per_image_histo = bucketize_histograms(images)
+    lgi('x: %r', overall_histo)
     board = Board(source_image, images)
     min_width, min_height = _get_min_width_and_height(images)
     min_width = 2 * (min_width / 2)
     min_height = 2 * (min_height / 2)
     min_width, min_height = int(min_width / 1.5), int(min_height / 1.5)
     lgi('Min width, height: (%d,%d)', min_width, min_height)
-    scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
-    ic = ImageClassifier(board, source_image, images, min_width, min_height)
-    ic.match()
+    #scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
+    ic = ImageClassifier(board, source_image, images, min_width, min_height, start_time)
+    #ic.match()
+    ic.match2(overall_histo, per_image_histo, min_width, min_height)
     free_tiles, ending_col, ending_row = get_free_tiles(board)
     fill_sides(board, free_tiles, ending_col, ending_row)
     return board.as_ary()
