@@ -8,7 +8,7 @@ import datetime
 random.seed(1)
 
 SCORE_UNPLACED = 200000
-MAX_MILLIS = 9 * 1000 * 1000
+MAX_MILLIS = 8 * 1000 * 1000
 
 def lgi(msg, *args):
     print >>sys.stderr, msg % args
@@ -247,35 +247,6 @@ class Image(object):
         return '<image:%r %dx%d>' % (img_id, self.width, self.height)
 
 
-def simulated_annealing(board, dist=5):
-    for tile_pos1 in range(len(board.tiles)):
-        if dist > 0:
-            tile_pos2 = (tile_pos1 + dist) % len(board.tiles)
-        else:
-            tile_pos2 = (tile_pos1 - board.row_count() * dist) % len(board.tiles)
-        t1, t2 = board.tiles[tile_pos1], board.tiles[tile_pos2]
-        if not t1.placed() or not t2.placed():
-            continue
-        t1_dim, t2_dim = t1.dim(), t2.dim()
-        if t1._image.width < t2_dim[0] or t1._image.height < t2_dim[1]:
-            lgi('Cannot swap %r with %r due to image size', t1, t2)
-            continue
-        if t2._image.width < t1_dim[0] or t2._image.height < t1_dim[1]:
-            lgi('Cannot swap %r with %r due to image size', t2, t1)
-            continue
-        lgi('Testing swapping %r and %r', t1, t2)
-        score1 = board.score(tile_pos1)
-        score2 = board.score(tile_pos2)
-        board.swap(tile_pos1, tile_pos2)
-        score1_new = board.score(tile_pos1)
-        score2_new = board.score(tile_pos2)
-        if score1_new + score2_new < score1 + score2:
-            lgi('Good swap with tile %s and %s', board.tiles[tile_pos2], board.tiles[tile_pos1])
-        else:
-            # swap back
-            board.swap(tile_pos1, tile_pos2)
-
-
 def _get_min_width_and_height(images):
     min_width, min_height = sys.maxint, sys.maxint
     for img in images:
@@ -326,14 +297,6 @@ def fill_sides(board, free_tiles, ending_col, ending_row):
         col += w
 
 
-def bit_count(int_type):
-    count = 0
-    while int_type:
-        int_type &= int_type - 1
-        count += 1
-    return count
-
-
 def image_histo_around(img):
     normal = image_histo(img.data)
     half_size = Counter()
@@ -368,56 +331,6 @@ def image_histo_offsets(data, offsets):
         c[color] = 10000 * c[color] / (len(data)*len(data[0]))
     return c
 
-def classify_image(data, offsets=None):
-    if offsets:
-        col_start, col_end = offsets[0], offsets[1]
-        row_start, row_end = offsets[2], offsets[3]
-    else:
-        col_start, col_end = 0, len(data[0])
-        row_start, row_end = 0, len(data)
-    min_col = (col_end + col_start) / 2
-    min_row = (row_end + row_start) / 2
-    colors = [0, 0, 0, 0]
-    colors_pos = 0
-    total_color_count = 0
-    for row_min, row_max in ((row_start, min_row), (min_row, row_end)):
-        col_min, col_max = col_start, min_col
-        for row in data[row_min:row_max]:
-            for val in row[col_min:col_max]:
-                colors[colors_pos] += val
-        total_color_count += colors[colors_pos]
-        colors[colors_pos] /= (row_max-row_min)*(col_max-col_min)
-        colors_pos += 1
-    for col_min, col_max in ((col_start, min_col), (min_col, col_end)):
-        row_min, row_max = row_start, min_row
-        for row in data[row_min:row_max]:
-            for val in row[col_min:col_max]:
-                colors[colors_pos] += val
-        total_color_count += colors[colors_pos]
-        colors[colors_pos] /= (row_max-row_min)*(col_max-col_min)
-        colors_pos += 1
-
-    size = (col_end-col_start)*(row_end-row_start)
-    avg = total_color_count / size
-    return avg, colors
-
-
-def compare_ci(img1_ci, img2_ci):
-    avg_diff = math.pow(img1_ci[0]-img2_ci[0], 2)
-    quad_diff = 0
-    for quad in zip(img1_ci[1], img2_ci[1]):
-        quad_diff += math.pow(quad[0]-quad[1], 2)
-    return math.sqrt(avg_diff+quad_diff)
-
-
-def classify_large_image(data, width, height):
-    info = dict()
-    for row in range(0, len(data)-height, height):
-        for col in range(0, len(data[0])-width, width):
-            ci = classify_image(data, offsets=(col, col+width, row, row+height))
-            info[(col, row)] = ci
-    return info
-
 
 def histo_large_image(data, width, height, overall_histo):
     info = dict()
@@ -444,16 +357,18 @@ def histo_large_image(data, width, height, overall_histo):
     return info
 
 
+def _get_random_image_ids(number):
+    ids = list(range(0, number))
+    random.shuffle(ids)
+    return ids
+
+
 class ImageClassifier(object):
-    def __init__(self, board, source_image, images, width, height, start_time):
+    def __init__(self, board, source_image, width, height, start_time):
         self.start_time = start_time
         self.board = board
         self.source_image = source_image
         self.width, self.height = width, height
-        self.source_image_class = classify_large_image(source_image.data, width, height)
-        self.image_classes = list()
-        for img in images:
-            self.image_classes.append(classify_image(img.data))
         self.image_board_score = defaultdict(dict)
         self.total_score = 0
 
@@ -466,9 +381,6 @@ class ImageClassifier(object):
         if dim1_col == -1:
             return SCORE_UNPLACED
         else:
-            if img_id not in self.image_board_score[(dim1_col, dim1_row)]:
-                score = compare_ci(self.source_image_class[(dim1_col, dim1_row)], self.image_classes[img_id])
-                self.image_board_score[(dim1_col, dim1_row)][img_id] = score
             return self.image_board_score[(dim1_col, dim1_row)][img_id]
 
     def _check_swap(self, img1, img2):
@@ -483,11 +395,6 @@ class ImageClassifier(object):
         else:
             # revert
             self.board.swap(img1, img2)
-
-    def _get_random_image_ids(self):
-        ids = list(range(0, len(self.image_classes)))
-        random.shuffle(ids)
-        return ids
 
     def match2(self, overall_histo, per_image_histo, width, height):
         sic = histo_large_image(self.source_image.data, self.width, self.height, overall_histo)
@@ -504,13 +411,13 @@ class ImageClassifier(object):
                 self.total_score += tot
         lgi('Initial score: %r', self.total_score)
         for t in range(30):
-            delta_time = self.delta()
-            if delta_time > MAX_MILLIS:
-                lgi('Breaking as time: %r', delta_time)
-                break
-            ids = self._get_random_image_ids()
+            ids = _get_random_image_ids(len(per_image_histo))
             cur_score = self.total_score
             while len(ids) >= 2:
+                delta_time = self.delta()
+                if delta_time > MAX_MILLIS:
+                    lgi('Breaking as time: %r', delta_time)
+                    break
                 id1, id2 = ids.pop(0), ids.pop(0)
                 self._check_swap(id1, id2)
             lgi('Score at round %d: %r', t, self.total_score)
@@ -518,33 +425,6 @@ class ImageClassifier(object):
                 break
         lgi('Final score: %r', self.total_score)
         lgi('Total time: %r', self.delta() / 1000)
-
-    def match(self):
-        ids = self._get_random_image_ids()
-        lgi('Randomly placing images')
-        number_rows, number_cols = 0, 0
-        for row in range(0, self.source_image.height-self.height, self.height):
-            for col in range(0, self.source_image.width-self.width, self.width):
-                if number_rows == 0:
-                    number_cols += 1
-                img_id = ids.pop(0)
-                x = self.source_image_class[(col, row)]
-                y = self.image_classes[img_id]
-                score = compare_ci(x, y)
-                self.board.place(img_id, col, row, log=True)
-                self.image_board_score[(col, row)][img_id] = score
-                self.total_score += score
-            number_rows += 1
-        lgi('Initial score: %r', self.total_score)
-        for t in range(10):
-            ids = self._get_random_image_ids()
-            cur_score = self.total_score
-            while len(ids) >= 2:
-                id1, id2 = ids.pop(0), ids.pop(0)
-                self._check_swap(id1, id2)
-            lgi('Initial score: %r', self.total_score)
-            if cur_score == self.total_score:
-                break
 
 
 def get_free_tiles(board):
@@ -605,7 +485,7 @@ def do_work(source_image, images):
     min_width, min_height = int(min_width / 1.5), int(min_height / 1.5)
     lgi('Min width, height: (%d,%d)', min_width, min_height)
     #scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
-    ic = ImageClassifier(board, source_image, images, min_width, min_height, start_time)
+    ic = ImageClassifier(board, source_image, min_width, min_height, start_time)
     #ic.match()
     ic.match2(overall_histo, per_image_histo, min_width, min_height)
     free_tiles, ending_col, ending_row = get_free_tiles(board)
@@ -653,9 +533,13 @@ def do_check(ret, images):
                 row[c] = piece
 
 
-def compose(image_collection):
-    source_image, images = make_images(image_collection)
-    lgi('Source image %s', source_image)
-    ret = do_work(source_image, images)
-    do_check(ret, images)
-    return ret
+class CollageMaker(object):
+    def __init__(self):
+        pass
+
+    def compose(self, image_collection):
+        source_image, images = make_images(image_collection)
+        lgi('Source image %s', source_image)
+        ret = do_work(source_image, images)
+        #do_check(ret, images)
+        return ret

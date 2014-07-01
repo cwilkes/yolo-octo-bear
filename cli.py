@@ -1,6 +1,5 @@
 import sys
-import collage_maker as cm
-
+from collage_maker import CollageMaker
 
 def read_int():
     return int(read_str())
@@ -13,7 +12,7 @@ def read_str():
 def main(args):
     N = read_int()
     data = [read_int() for _ in range(N)]
-    ret = cm.compose(data)
+    ret = CollageMaker().compose(data)
     for r in ret:
         print r
     sys.stdout.flush()
