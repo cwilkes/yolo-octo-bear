@@ -7,8 +7,9 @@ import datetime
 
 random.seed(1)
 
-SCORE_UNPLACED = 200000
+SCORE_UNPLACED = 2
 MAX_MILLIS = 8 * 1000 * 1000
+
 
 def lgi(msg, *args):
     print >>sys.stderr, msg % args
@@ -31,7 +32,8 @@ class Board(object):
         self.source_breaks = dict()
         self.tiles = list()
         for image in images:
-            self.tiles.append(Tile(len(self.tiles), image))
+            self.tiles.append(Tile(image))
+        lgi('First tile out of %d: %r', len(self.tiles), self.tiles[0])
 
     def threshold_scoring(self, width, height, thresholds, offset_col=0, offset_row=0):
         if type(thresholds) == int:
@@ -77,33 +79,32 @@ class Board(object):
         self.place(tile_pos1, tile2_pos[0], tile2_pos[1], tile2_dim[0], tile2_dim[1])
         self.place(tile_pos2, tile1_pos[0], tile1_pos[1], tile1_dim[0], tile1_dim[1])
 
-    def remove(self, tile_pos):
-        self.place(tile_pos, -1, -1, -1, -1)
-
-    def place(self, tile_pos, top_col, top_row, width=None, height=None, log=False, do_check=True):
+    def place(self, tile_pos, top_row, top_col, width=None, height=None, log=False, do_check=True):
         try:
             tile = self.tiles[tile_pos]
         except:
             raise Exception('Asking for tile_pos %r in array size %r' % (tile_pos, len(self.tiles)))
         prev = repr(tile)
-        tile.move(top_col, top_row)
+        tile.move(top_row, top_col)
         if width is not None:
             tile.resize(width, height)
         if log:
             lgi('Changed tile %r to %r', prev, tile)
         if do_check:
             box = tile.box()
-            if box[0] is not None:
+            if box[0] != -1:
                 if box[0] < 0 or box[1] < 0:
-                    raise Exception('Tile %r box %r is above or to right of image %r' % (tile, box, self.source_image))
-                if box[2] >= self.source_image.width or box[3] >= self.source_image.height:
-                    raise Exception('Tile %r box %r is below or to right of image %r' % (tile, box, self.source_image))
-        return tile._mini_image
+                    raise Exception('%r is above or to right of image %r' % (tile, self.source_image))
+                if box[2] >= self.source_image.height:
+                    raise Exception('%r is below %r' % (tile, self.source_image))
+                if box[3] >= self.source_image.width:
+                    raise Exception('%r is to right of %r' % (tile, self.source_image))
+        return tile.dim()
 
     def as_ary(self):
         ret = list()
         for tile in self.tiles:
-            ret.extend(tile.as_ary())
+            ret.extend(tile.box())
         return ret
 
     def dim(self, tile_id):
@@ -121,14 +122,16 @@ class Board(object):
 
 
 class Tile(object):
-    def __init__(self, index, image, top_col=-1, top_row=-1, width=-1, height=-1):
-        self.index = index
+    """An image with a position and a scaled size
+    """
+    def __init__(self, image, top_row=-1, top_col=-1, width=-1, height=-1):
+        self.index = image.index
         self._image = image
         self._top_col, self._top_row = top_col, top_row
-        self._mini_image = None
+        self._width, self._height = width, height
         self.resize(width, height)
 
-    def move(self, top_col, top_row):
+    def move(self, top_row, top_col):
         self._top_col, self._top_row = top_col, top_row
 
     def resize(self, width, height):
@@ -136,115 +139,63 @@ class Tile(object):
             raise Exception('Width should not be less than -1: %d' % (width, ))
         if height < -1:
             raise Exception('Height should not be less than -1: %d' % (height, ))
-        if width == -1 or height == -1:
-            self._mini_image = None
+        if width >= self._image.width:
+            lgi('Asked to make width larger (%d) than original width (%d).  Setting to max', width, self._image.width)
+            self._width = self._image.width
         else:
-            self._mini_image = self._image.scale(width, height)
+            self._width = width
+        if height >= self._image.height:
+            lgi('Asked to make height larger (%d) than original height (%d).  Setting to max', height, self._image.height)
+            self._height = self._image.height
+        else:
+            self._height = height
+        return self._width, self._height
 
     def placed(self):
-        return self._mini_image is not None and self._top_col != -1
+        return self._width != -1 and self._top_col != -1
 
     def box(self):
         if self.placed():
-            return self._top_col, self._top_row, self._top_col + self._mini_image.width-1, self._top_row + self._mini_image.height-1
+            return self._top_row, self._top_col, self._top_row+self._height-1, self._top_col+self._width-1
         else:
-            return None, None, None, None
-
-    def data(self):
-        if self._mini_image:
-            return self._mini_image.data
-        else:
-            return None
+            return -1, -1, -1, -1
 
     def dim(self):
-        if self._mini_image is None:
-            return None, None
-        else:
-            return self._mini_image.width, self._mini_image.height
+        return self._width, self._height
 
     def coord(self):
-        return self._top_col, self._top_row
+        return self._top_row, self._top_col
 
     def __repr__(self):
-        if self._mini_image:
-            return '<Tile: @ (%d,%d-%d,%d) image %s : %s>' % \
-                   (self._top_col, self._top_row, self._top_col + self._mini_image.width-1, self._top_row + self._mini_image.height-1, self._image, self._mini_image)
-        else:
-            return '<Tile: @ (%d,%d-NA) image %s : %s>' % (self._top_col, self._top_row, self._image, self._mini_image)
-
-    def as_ary(self):
-        if self.placed():
-            return [self._top_row, self._top_col, self._top_row+self._mini_image.height-1, self._top_col+self._mini_image.width-1]
-        else:
-            return [-1, -1, -1, -1]
+        return '<Tile: %d %r dim %r size %r>' % (self.index, self._image, self.box(), self.dim())
 
 
 class Image(object):
+    """image colors are [0,255] inclusive
+    """
     def __init__(self, index, data, sub_title=None):
         if type(index) is not int:
             raise Exception('Index (%r) should be an int, not %s' % (index, type(index)))
         self.index = index
-        self.data = data
-        self.width, self.height = len(self.data[0]), len(self.data)
+        self._data = data
+        self.width, self.height = len(self._data[0]), len(self._data)
         self.sub_title = sub_title
-
-    def threshold_scoring(self, thresholds):
-        t2 = thresholds + [255]
-        counts = [0 for _ in range(len(thresholds)+1)]
-        for r2 in range(self.height):
-            for c2 in range(self.width):
-                for pos, val in enumerate(t2):
-                    if self.data[r2][c2] <= val:
-                        counts[pos] += 1
-                        break
-        return counts
-
-    def scale(self, width, height):
-        ret = list()
-        ratio_w = 1.0 * self.width / width
-        ratio_h = 1.0 * self.height / height
-        if ratio_w < 1.0 or ratio_h < 1.0:
-            raise Exception('Resizing image %s should be downsized, not going to (%d,%d) (ratios: %r, %r)' % (self, width, height, ratio_w, ratio_h))
-        ratio_w_int, ratio_h_int = int(ratio_w), int(ratio_h)
-        top_r = 0
-        for r1 in range(height):
-            row = list()
-            top_c = 0
-            for c1 in range(width):
-                count, color_sum = 0, 0
-                for r2 in range(ratio_h_int):
-                    for c2 in range(ratio_w_int):
-                        try:
-                            color_sum += self.data[int(top_r+r2)][int(top_c+c2)]
-                            count += 1
-                        except Exception as ex:
-                            lgi('For image %s at (%d,%d) have no nodes at (%d,%d) + (%d,%d) size (%d,%d): %s', self, top_c, top_r, c1, r1, c2, r2, len(self.data), len(self.data[0]), ex)
-                # should really do the next fraction
-                if count > 0:
-                    row.append(color_sum / count)
-                else:
-                    lgi('For image %s at (%d,%d) have no nodes at (%d,%d) ratios (%r,%r)',
-                        self._image, top_c, top_r, c1, r1, ratio_w, ratio_h)
-                top_c += ratio_w
-            ret.append(row)
-            top_r += ratio_h
-        return Image(self.index, ret, '%r_%r' % (width, height))
 
     def __getitem__(self, item):
         try:
-            return self.data[item]
+            return self._data[item]
         except IndexError as ex:
             raise Exception('Cannot get item %d out of data of size %d : %s' % (item, len(self.data), ex))
 
-    def __sizeof__(self):
-        return len(self.data)
+    def __len__(self):
+        return self.height
 
     def __repr__(self):
         if self.sub_title is None:
             img_id = self.index
         else:
             img_id = '%s_%s' % (self.index, self.sub_title)
-        return '<image:%r %dx%d>' % (img_id, self.width, self.height)
+        return '<image:%s %dx%d>' % (img_id, self.width, self.height)
 
 
 def _get_min_width_and_height(images):
@@ -280,9 +231,9 @@ def fill_sides(board, free_tiles, ending_col, ending_row):
     while row < source_image.height:
         tile = free_tiles.pop(0)
         img = tile._image
-        w = source_image.width-ending_col
-        h = min(img.height, source_image.height-row)
-        board.place(tile._image.index, ending_col, row, w, h, True)
+        h = min(source_image.height, board.source_image.height-row)
+        w = source_image.width - ending_col
+        w, h = board.place(tile.index, row, ending_col, w, h, True)
         row += h
     col = 0
     lgi('Filling in bottom row %r', ending_row)
@@ -293,43 +244,35 @@ def fill_sides(board, free_tiles, ending_col, ending_row):
         h = source_image.height-ending_row
         if w <= 0 or h <= 0:
             break
-        board.place(tile._image.index, col, ending_row, w, h, True)
+        board.place(tile.index, ending_row, col, w, h, True)
         col += w
 
 
-def image_histo_around(img):
-    normal = image_histo(img.data)
-    half_size = Counter()
-    for r in range(0, len(img.data)-1, 2):
-        for c in range(0, len(img.data[0])-1, 2):
-            col = img.data[r][c]
-            col += img.data[r][c+1]
-            col += img.data[r+1][c]
-            col += img.data[r+1][c+1]
-            half_size[col/4] += 1
-    for color in half_size.keys():
-        half_size[color] = 40000 * c[color] / (len(img.data)*len(img.data[0]))
-    return normal, half_size
-
-
-def image_histo(data):
-    c = Counter()
-    for row in data:
-        for val in row:
+def image_histogram(data, offsets=None):
+    c = [0 for _ in range(256)]
+    if offsets:
+        row_start, col_start, row_end, col_end = offsets
+    else:
+        row_start, row_end = 0, len(data)
+        col_start, col_end = 0, len(data[0])
+    for row in data[row_start:row_end]:
+        for val in row[col_start:col_end]:
             c[val] += 1
-    for color in c.keys():
-        c[color] = 10000 * c[color] / (len(data)*len(data[0]))
-    return c
-
-
-def image_histo_offsets(data, offsets):
-    c = Counter()
-    for row in data[offsets[2]:offsets[3]]:
-        for val in row[offsets[0]:offsets[1]]:
-            c[val] += 1
-    for color in c.keys():
-        c[color] = 10000 * c[color] / (len(data)*len(data[0]))
-    return c
+    side_buffers = list()
+    img_size = (row_end-row_start)*(col_end-col_start)
+    for pos in range(256):
+        val = 0
+        if pos > 1:
+            val += 0.25 * c[pos-2]
+        if pos > 0:
+            val += 0.5 * c[pos-1]
+        val += c[pos]
+        if pos <= 254:
+            val += 0.5 * c[pos+1]
+        if pos <= 253:
+            val += 0.25 * c[pos+2]
+        side_buffers.append(1.0 * val / img_size)
+    return side_buffers
 
 
 def histo_large_image(data, width, height, overall_histo):
@@ -363,68 +306,127 @@ def _get_random_image_ids(number):
     return ids
 
 
-class ImageClassifier(object):
-    def __init__(self, board, source_image, width, height, start_time):
-        self.start_time = start_time
-        self.board = board
-        self.source_image = source_image
-        self.width, self.height = width, height
-        self.image_board_score = defaultdict(dict)
-        self.total_score = 0
+class MyTimer(object):
+    def __init__(self):
+        self.start_time = datetime.datetime.now()
 
     def delta(self):
         dt = datetime.datetime.now() - self.start_time
         return 1000*1000*dt.seconds + dt.microseconds
 
+    def should_finish(self):
+        return self.delta() > MAX_MILLIS
+
+
+def bucketized_histogram(histogram, breaks):
+    ret = list()
+    cume = 0
+    b = [_[0] for _ in breaks]
+    stop = b.pop(0)
+    for pos, val in enumerate(histogram):
+        cume += val
+        if pos == stop:
+            ret.append(cume)
+            cume = 0
+            if not b:
+                break
+            stop = b.pop(0)
+    return ret
+
+
+class ImageClassifier(object):
+    def __init__(self, board, width, height, timer):
+        self.board = board
+        self.width, self.height = width, height
+        self.image_board_score = defaultdict(dict)
+        self.total_score = 0
+        self._source_image_histogram = dict()
+        self.number_images = len(board.tiles)
+        self.placed_coords = list()
+        self.total_score = 0
+        self.timer = timer
+        for row in range(0, len(board.source_image)-height, height):
+            for col in range(0, len(board.source_image[0])-width, width):
+                self.placed_coords.append((row, col))
+        lgi('Computing histograms')
+        self._image_histograms = list()
+        for tile in board.tiles:
+            self._image_histograms.append(image_histogram(tile._image._data))
+        lgi('Done computing histograms')
+        self.histogram_breaks = find_histo_breaks(self._image_histograms, 8)
+        lgi('Histo breaks: %r', self.histogram_breaks)
+        self.image_histograms_breaks = list()
+        self.source_image_histogram_breaks = dict()
+        for histo in self._image_histograms:
+            self.image_histograms_breaks.append(bucketized_histogram(histo, self.histogram_breaks))
+        for row, col in self.placed_coords:
+            raw = image_histogram(board.source_image, offsets=(row, col, row+height, col+height))
+            self.source_image_histogram_breaks[(row, col)] = bucketized_histogram(raw, self.histogram_breaks)
+
     def _get_score(self, img_id):
-        dim1_col, dim1_row = self.board.coord(img_id)
-        if dim1_col == -1:
+        key = self.board.coord(img_id)
+        if key[0] == -1:
             return SCORE_UNPLACED
-        else:
-            return self.image_board_score[(dim1_col, dim1_row)][img_id]
+        if key in self.image_board_score:
+            if img_id in self.image_board_score[key]:
+                return self.image_board_score[key][img_id]
+        overall_histogram = self.source_image_histogram_breaks[key]
+        tot = 0
+        for a, b in zip(overall_histogram, self.image_histograms_breaks[img_id]):
+            tot += math.pow(a-b, 2)
+        tot = math.sqrt(tot)
+        self.image_board_score[key][img_id] = tot
+        return tot
 
     def _check_swap(self, img1, img2):
         score1_pre, score2_pre = self._get_score(img1), self._get_score(img2)
+        img1_coord, img2_coord = self.board.coord(img1), self.board.coord(img2)
         self.board.swap(img1, img2)
         score1_post, score2_post = self._get_score(img1), self._get_score(img2)
         delta_score = (score1_pre + score2_pre) - (score1_post + score2_post)
+        #lgi('Swapped ids %r and %r, pre: (%r,%r), post: (%r,%r) => %r', img1, img2, score1_pre, score2_pre, score1_post, score2_post, delta_score)
         if delta_score > 0:
             # good move, adjust total score
-            lgi('Good move with ids %r and %r, pre: (%d,%d), post: (%d,%d) => %d', img1, img2, score1_pre, score2_pre, score1_post, score2_post, delta_score)
             self.total_score -= delta_score
+            return True
         else:
             # revert
+            #lgi('Bad move with ids %r and %r, pre: (%d,%d), post: (%d,%d) => %r', img1, img2, score1_pre, score2_pre, score1_post, score2_post, delta_score)
             self.board.swap(img1, img2)
+            self.board.place(img1, img1_coord[0], img1_coord[1])
+            self.board.place(img2, img2_coord[0], img2_coord[1])
+            return False
 
-    def match2(self, overall_histo, per_image_histo, width, height):
-        sic = histo_large_image(self.source_image.data, self.width, self.height, overall_histo)
-        locales = list(sic.keys())
-        for img_index, histo in enumerate(per_image_histo):
-            for key, bank in sic.items():
-                tot = 0
-                for a, b in zip(histo, bank):
-                    tot += (a-b)**2
-                self.image_board_score[key][img_index] = tot
-            if locales:
-                placed = locales.pop(0)
-                self.board.place(img_index, placed[0], placed[1], width, height, log=True)
-                self.total_score += tot
-        lgi('Initial score: %r', self.total_score)
-        for t in range(30):
-            ids = _get_random_image_ids(len(per_image_histo))
-            cur_score = self.total_score
-            while len(ids) >= 2:
-                delta_time = self.delta()
-                if delta_time > MAX_MILLIS:
-                    lgi('Breaking as time: %r', delta_time)
+    def match(self):
+        x = list(self.placed_coords)
+        for img_index in _get_random_image_ids(self.number_images):
+            row, col = x.pop(0)
+            self.board.place(img_index, row, col, self.width, self.height, log=True)
+            self.total_score += self._get_score(img_index)
+            if not x:
+                break
+        lgi('initial placement score: %r', self.total_score)
+        for t in range(10):
+            number_swaps = 0
+            for id1 in range(self.number_images):
+                for id2 in range(self.number_images):
+                    if id1 == id2:
+                        continue
+                    if self.timer.should_finish():
+                        break
+                    if self._check_swap(id1, id2):
+                        number_swaps += 1
+                        break
+                if self.timer.should_finish():
                     break
-                id1, id2 = ids.pop(0), ids.pop(0)
-                self._check_swap(id1, id2)
-            lgi('Score at round %d: %r', t, self.total_score)
-            if cur_score == self.total_score:
+            lgi('Score in round %r after %d swaps: %r', t, number_swaps, self.total_score)
+            if self.timer.should_finish():
+                lgi('Breaking due to time')
+                break
+            if number_swaps <= 1:
                 break
         lgi('Final score: %r', self.total_score)
-        lgi('Total time: %r', self.delta() / 1000)
+        lgi('Total time: %r', self.timer.delta() / 1000)
 
 
 def get_free_tiles(board):
@@ -432,52 +434,41 @@ def get_free_tiles(board):
     ending_col, ending_row = 0, 0
     for tile in board.tiles:
         box = tile.box()
-        if box[0] is None:
+        if box[0] == -1:
             free_tiles.append(tile)
         else:
-            ending_col = max(ending_col, box[2]+1)
-            ending_row = max(ending_row, box[3]+1)
+            ending_col = max(ending_col, box[3]+1)
+            ending_row = max(ending_row, box[2]+1)
     return free_tiles, ending_col, ending_row
 
 
-def bucketize_histograms(images):
-    ret1 = list()
-    all_colors = Counter()
-    for img in images:
-        c = image_histo(img.data)
-        ret1.append(c)
-        all_colors += c
+def find_histo_breaks(img_histos, number_breaks):
+    all_colors = [0 for _ in range(256)]
     total_count = 0
-    for color, count in all_colors.items():
-        total_count += count
-    delta = total_count / 8
-    ret = list()
+    for histo in img_histos:
+        for pos, val in enumerate(histo):
+            all_colors[pos] += val
+            total_count += val
+    delta = 1.0 * total_count / number_breaks
     cume = 0
-    for color in sorted(all_colors.keys()):
+    next_val = delta
+    breaks = list()
+    prev = 0
+    for color in range(256):
         cume += all_colors[color]
-        if cume >= delta:
-            ret.append((color, cume))
-            cume = 0
-    ret.append((color, cume))
+        if cume >= next_val:
+            breaks.append((color, cume-prev))
+            next_val += delta
+            prev = cume
+    breaks.append((color, cume-prev))
     if color != 255:
-        ret.append((255, cume))
-    per_image = list()
-    for c in ret1:
-        my_colors = sorted(c.keys())
-        foo = list()
-        for color in (_[0] for _ in ret):
-            cur = 0
-            while my_colors and my_colors[0] <= color:
-                cur += c[my_colors.pop(0)]
-            foo.append((cur+50)/100)
-        per_image.append(foo)
-    return ret, per_image
+        breaks.append((255, total_count-cume))
+    return breaks
 
 
-def do_work(source_image, images):
-    start_time = datetime.datetime.now()
-    overall_histo, per_image_histo = bucketize_histograms(images)
-    lgi('x: %r', overall_histo)
+def do_work(source_image, images, timer):
+    #overall_histo, per_image_histo = bucketize_histograms(images)
+    #lgi('x: %r', overall_histo)
     board = Board(source_image, images)
     min_width, min_height = _get_min_width_and_height(images)
     min_width = 2 * (min_width / 2)
@@ -485,9 +476,10 @@ def do_work(source_image, images):
     min_width, min_height = int(min_width / 1.5), int(min_height / 1.5)
     lgi('Min width, height: (%d,%d)', min_width, min_height)
     #scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
-    ic = ImageClassifier(board, source_image, min_width, min_height, start_time)
+    ic = ImageClassifier(board, min_width, min_height, timer)
     #ic.match()
-    ic.match2(overall_histo, per_image_histo, min_width, min_height)
+    #ic.match2(overall_histo, per_image_histo, min_width, min_height)
+    ic.match()
     free_tiles, ending_col, ending_row = get_free_tiles(board)
     fill_sides(board, free_tiles, ending_col, ending_row)
     return board.as_ary()
@@ -538,8 +530,10 @@ class CollageMaker(object):
         pass
 
     def compose(self, image_collection):
+        timer = MyTimer()
         source_image, images = make_images(image_collection)
         lgi('Source image %s', source_image)
-        ret = do_work(source_image, images)
+        ret = do_work(source_image, images, timer)
+        lgi('Total time: %r', timer.delta()/1000)
         #do_check(ret, images)
         return ret
