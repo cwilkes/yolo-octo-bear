@@ -3,7 +3,7 @@ from collections import defaultdict, Counter
 import math
 import random
 import datetime
-
+from operator import itemgetter
 
 random.seed(1)
 
@@ -226,6 +226,8 @@ def find_matches(board_scores, scaled_images_scores):
 
 def fill_sides(board, free_tiles, ending_col, ending_row):
     row = 0
+    start_count = len(free_tiles)
+    lgi('Have %d free tiles to fill in slots', start_count)
     lgi('Filling in right col %r', ending_col)
     source_image = board.source_image
     while row < source_image.height:
@@ -246,9 +248,11 @@ def fill_sides(board, free_tiles, ending_col, ending_row):
             break
         board.place(tile.index, ending_row, col, w, h, True)
         col += w
+    end_count = len(free_tiles)
+    lgi('Filled in spaces with %d tiles.  have %d total remaining free', start_count-end_count, end_count)
 
 
-def image_histogram(data, offsets=None):
+def image_histogram_raw(data, offsets=None):
     c = [0 for _ in range(256)]
     if offsets:
         row_start, col_start, row_end, col_end = offsets
@@ -258,8 +262,12 @@ def image_histogram(data, offsets=None):
     for row in data[row_start:row_end]:
         for val in row[col_start:col_end]:
             c[val] += 1
+    return c, (row_end-row_start)*(col_end-col_start)
+
+
+def image_histogram(data, offsets=None):
+    c, img_size = image_histogram_raw(data, offsets)
     side_buffers = list()
-    img_size = (row_end-row_start)*(col_end-col_start)
     for pos in range(256):
         val = 0
         if pos > 1:
@@ -273,6 +281,54 @@ def image_histogram(data, offsets=None):
             val += 0.25 * c[pos+2]
         side_buffers.append(1.0 * val / img_size)
     return side_buffers
+
+
+def quadrant_histogram(data, offsets=None):
+    """ 0: upper left, 1: upper right, 2: lower left, 3: lower right
+    """
+    if offsets:
+        row_start, col_start, row_end, col_end = offsets
+    else:
+        row_start, row_end = 0, len(data)
+        col_start, col_end = 0, len(data[0])
+    mid_row, mid_col = (row_end+row_start)/2, (col_end+col_start)/2
+    quads = list()
+    q = [0 for _ in range(256)]
+    for row in data[row_start:mid_row]:
+        for val in row[col_start:mid_col]:
+            q[val] += 1
+    quads.append(q)
+    q = [0 for _ in range(256)]
+    for row in data[row_start:mid_row]:
+        for val in row[mid_col:col_end]:
+            q[val] += 1
+    quads.append(q)
+    q = [0 for _ in range(256)]
+    for row in data[mid_row:row_end]:
+        for val in row[col_start:mid_col]:
+            q[val] += 1
+    quads.append(q)
+    q = [0 for _ in range(256)]
+    for row in data[mid_row:row_end]:
+        for val in row[mid_col:col_end]:
+            q[val] += 1
+    quads.append(q)
+    #lgi('Sizes for quads for (%d,%d,%d,%d) : %s', row_start, col_start, row_end, col_end, str([len(_) for _ in quads]))
+    return quads
+
+
+def find_median(histogram, number_elements=None):
+    if number_elements is None:
+        number_elements = 0
+        for val in histogram:
+            number_elements += val
+    cume = 0
+    for color, count in enumerate(histogram):
+        cume += count
+        if cume >= number_elements/2:
+            return color
+    # should not happen
+    return 255
 
 
 def histo_large_image(data, width, height, overall_histo):
@@ -353,7 +409,7 @@ class ImageClassifier(object):
         for tile in board.tiles:
             self._image_histograms.append(image_histogram(tile._image._data))
         lgi('Done computing histograms')
-        self.histogram_breaks = find_histo_breaks(self._image_histograms, 8)
+        self.histogram_breaks = find_histo_breaks(self._image_histograms, 4)
         lgi('Histo breaks: %r', self.histogram_breaks)
         self.image_histograms_breaks = list()
         self.source_image_histogram_breaks = dict()
@@ -362,6 +418,18 @@ class ImageClassifier(object):
         for row, col in self.placed_coords:
             raw = image_histogram(board.source_image, offsets=(row, col, row+height, col+height))
             self.source_image_histogram_breaks[(row, col)] = bucketized_histogram(raw, self.histogram_breaks)
+        self.scorings = list()
+        for img in (t._image for t in board.tiles):
+            medians = list()
+            for quad in quadrant_histogram(img._data):
+                medians.append(find_median(quad))
+            self.scorings.append(medians)
+        self.source_image_scorings = dict()
+        for row, col in self.placed_coords:
+            medians = list()
+            for quad in quadrant_histogram(board.source_image, offsets=(row, col, row+height, col+height)):
+                medians.append(find_median(quad))
+            self.source_image_scorings[(row,col)] = medians
 
     def _get_score(self, img_id):
         key = self.board.coord(img_id)
@@ -372,9 +440,15 @@ class ImageClassifier(object):
                 return self.image_board_score[key][img_id]
         overall_histogram = self.source_image_histogram_breaks[key]
         tot = 0
-        for a, b in zip(overall_histogram, self.image_histograms_breaks[img_id]):
-            tot += math.pow(a-b, 2)
-        tot = math.sqrt(tot)
+        #for a, b in zip(overall_histogram, self.image_histograms_breaks[img_id]):
+        #    tot += math.pow(a-b, 2)
+        #tot = math.sqrt(tot)
+        scorings_diff = 0
+        for a, b in zip(self.source_image_scorings[key], self.scorings[img_id]):
+            scorings_diff += (a-b)**2
+        #scorings_diff /= 100000.
+        #lgi('Tot: %r, scorings diff: %r', tot, scorings_diff)
+        tot += scorings_diff
         self.image_board_score[key][img_id] = tot
         return tot
 
@@ -399,12 +473,19 @@ class ImageClassifier(object):
 
     def match(self):
         x = list(self.placed_coords)
-        for img_index in _get_random_image_ids(self.number_images):
-            row, col = x.pop(0)
-            self.board.place(img_index, row, col, self.width, self.height, log=True)
-            self.total_score += self._get_score(img_index)
-            if not x:
-                break
+        random.shuffle(x)
+        placed_img = set()
+        for row, col in x:
+            best_score, best_img = sys.maxint, None
+            for img in range(self.number_images):
+                if img in placed_img:
+                    continue
+                score = self._get_score(img)
+                if score < best_score:
+                    best_score, best_img = score, img
+            placed_img.add(best_img)
+            self.total_score += best_score
+            self.board.place(best_img, row, col, self.width, self.height, log=True)
         lgi('initial placement score: %r', self.total_score)
         for t in range(10):
             number_swaps = 0
@@ -424,6 +505,8 @@ class ImageClassifier(object):
                 lgi('Breaking due to time')
                 break
             if number_swaps <= 1:
+                break
+            if t >= 2:
                 break
         lgi('Final score: %r', self.total_score)
         lgi('Total time: %r', self.timer.delta() / 1000)
@@ -473,7 +556,7 @@ def do_work(source_image, images, timer):
     min_width, min_height = _get_min_width_and_height(images)
     min_width = 2 * (min_width / 2)
     min_height = 2 * (min_height / 2)
-    min_width, min_height = int(min_width / 1.5), int(min_height / 1.5)
+    min_width, min_height = int(min_width/2), int(min_height/2)
     lgi('Min width, height: (%d,%d)', min_width, min_height)
     #scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
     ic = ImageClassifier(board, min_width, min_height, timer)
@@ -482,6 +565,7 @@ def do_work(source_image, images, timer):
     ic.match()
     free_tiles, ending_col, ending_row = get_free_tiles(board)
     fill_sides(board, free_tiles, ending_col, ending_row)
+
     return board.as_ary()
 
 
