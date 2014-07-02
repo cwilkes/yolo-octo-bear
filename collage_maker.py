@@ -7,7 +7,7 @@ from operator import itemgetter
 
 random.seed(1)
 
-SCORE_UNPLACED = 2
+SCORE_UNPLACED = 200000
 MAX_MILLIS = 8 * 1000 * 1000
 
 
@@ -396,6 +396,31 @@ class ImageClassifier(object):
         self.width, self.height = width, height
         self.image_board_score = defaultdict(dict)
         self.total_score = 0
+        self.number_images = len(board.tiles)
+        self.placed_coords = list()
+        self.total_score = 0
+        self.timer = timer
+        for row in range(0, len(board.source_image)-height, height):
+            for col in range(0, len(board.source_image[0])-width, width):
+                self.placed_coords.append((row, col))
+        self.scorings = list()
+        for img in (t._image for t in board.tiles):
+            medians = list()
+            for quad in quadrant_histogram(img._data):
+                medians.append(find_median(quad))
+            self.scorings.append(medians)
+        self.source_image_scorings = dict()
+        for row, col in self.placed_coords:
+            medians = list()
+            for quad in quadrant_histogram(board.source_image, offsets=(row, col, row+height, col+height)):
+                medians.append(find_median(quad))
+            self.source_image_scorings[(row,col)] = medians
+
+    def __init2__(self, board, width, height, timer):
+        self.board = board
+        self.width, self.height = width, height
+        self.image_board_score = defaultdict(dict)
+        self.total_score = 0
         self._source_image_histogram = dict()
         self.number_images = len(board.tiles)
         self.placed_coords = list()
@@ -409,7 +434,7 @@ class ImageClassifier(object):
         for tile in board.tiles:
             self._image_histograms.append(image_histogram(tile._image._data))
         lgi('Done computing histograms')
-        self.histogram_breaks = find_histo_breaks(self._image_histograms, 4)
+        #self.histogram_breaks = find_histo_breaks(self._image_histograms, 4)
         lgi('Histo breaks: %r', self.histogram_breaks)
         self.image_histograms_breaks = list()
         self.source_image_histogram_breaks = dict()
@@ -438,7 +463,7 @@ class ImageClassifier(object):
         if key in self.image_board_score:
             if img_id in self.image_board_score[key]:
                 return self.image_board_score[key][img_id]
-        overall_histogram = self.source_image_histogram_breaks[key]
+        #overall_histogram = self.source_image_histogram_breaks[key]
         tot = 0
         #for a, b in zip(overall_histogram, self.image_histograms_breaks[img_id]):
         #    tot += math.pow(a-b, 2)
