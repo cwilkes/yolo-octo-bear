@@ -308,6 +308,40 @@ def image_histogram(data, offsets=None):
     return side_buffers
 
 
+def find_medians(data, offsets=None, dim=(3, 3)):
+    if offsets:
+        row_start, col_start, row_end, col_end = offsets
+    else:
+        row_start, row_end = 0, len(data)
+        col_start, col_end = 0, len(data[0])
+    delta_col = 1.0 * (col_end-col_start) / dim[0]
+    delta_row = 1.0 * (row_end-row_start) / dim[1]
+    ret = list()
+    top_row = 0
+    for top_row_pos in range(dim[1]):
+        top_col = 0
+        space_vals = list()
+        for top_col_pos in range(dim[0]):
+            # now count inside box
+            t = 0
+            c = 0
+            row = top_row
+            while row < (top_row+delta_row):
+                col = top_col
+                while col < (top_col+delta_col):
+                    t += data[int(row)][int(col)]
+                    c += 1
+                    col += 1
+                row += 1
+            need_col = False
+            avg = 1.0*t/c
+            space_vals.append(int(avg))
+            top_col += delta_col
+        ret.append(space_vals)
+        top_row += delta_row
+    return ret
+
+
 def quadrant_histogram(data, offsets=None):
     """ 0: upper left, 1: upper right, 2: lower left, 3: lower right
     """
@@ -575,6 +609,10 @@ def find_histo_breaks(img_histos, number_breaks):
 def do_work(source_image, images, timer):
     #overall_histo, per_image_histo = bucketize_histograms(images)
     #lgi('x: %r', overall_histo)
+    find_medians(source_image.)
+    for img in images:
+        lgi('Img: %r has medians: %r', img, find_medians(img._data))
+    sys.exit(1)
     board = Board(source_image, images)
     min_width, min_height = _get_min_width_and_height(images)
     min_width = 2 * (min_width / 2)
@@ -630,6 +668,16 @@ def do_check(ret, images):
                     lgi('Error at (%d,%d) piece %s already exists, cannot put %s on it',
                         c, r, images[row[c]-1], images[piece-1])
                 row[c] = piece
+
+
+class TiledBoard(object):
+    def __init__(self, board, number_width, number_height):
+        width_pixels = board.source_image.width / number_width
+        offset_col = (board.source_image.width - number_width*width_pixels)/2
+        height_pixels = board.source_image.height / number_height
+        offset_row = (board.source_image.height - number_height*height_pixels)/2
+        self.medians = find_medians(board.source_image._data, offsets=(offset_col, offset_row), dim=(number_width, number_height))
+
 
 
 class CollageMaker(object):
