@@ -35,6 +35,31 @@ class Board(object):
             self.tiles.append(Tile(image))
         lgi('First tile out of %d: %r', len(self.tiles), self.tiles[0])
 
+    def get_tile_at(self, row, col):
+        # make more efficient l8r
+        for t in self.tiles:
+            d = t.coord()
+            if d[0] == row and d[1] == col:
+                return t
+        return None
+
+    def get_hits(self, row, col, width, height):
+        # box: return self._top_row, self._top_col, self._top_row+self._height-1, self._top_col+self._width-1
+        bottom_row, right_col = row + height-1, col+width-1
+        for t in self.tiles:
+            b = t.box()
+            if b[0] == -1:
+                continue
+            if b[0] > bottom_row:
+                continue
+            if b[1] > right_col:
+                continue
+            if b[2] < row:
+                continue
+            if b[3] < col:
+                continue
+            yield t.index
+
     def threshold_scoring(self, width, height, thresholds, offset_col=0, offset_row=0):
         if type(thresholds) == int:
             thresholds = [thresholds, ]
@@ -313,6 +338,15 @@ def quadrant_histogram(data, offsets=None):
         for val in row[mid_col:col_end]:
             q[val] += 1
     quads.append(q)
+    # now do middle 1/3rd
+    middle_height, middle_width = (row_end-row_start)/3, (col_end-col_start)/3
+    r_0, r_1 = row_start+middle_height, row_end-middle_height
+    c_0, c_1 = col_start+middle_width, col_end-middle_width
+    q = [0 for _ in range(256)]
+    for row in data[r_0:r_1]:
+        for val in row[c_0:c_1]:
+            q[val] += 1
+    quads.append(q)
     #lgi('Sizes for quads for (%d,%d,%d,%d) : %s', row_start, col_start, row_end, col_end, str([len(_) for _ in quads]))
     return quads
 
@@ -391,99 +425,58 @@ def bucketized_histogram(histogram, breaks):
 
 
 class ImageClassifier(object):
-    def __init__(self, board, width, height, timer):
+    def __init__(self, board, timer):
         self.board = board
-        self.width, self.height = width, height
         self.image_board_score = defaultdict(dict)
         self.total_score = 0
         self.number_images = len(board.tiles)
-        self.placed_coords = list()
         self.total_score = 0
         self.timer = timer
-        for row in range(0, len(board.source_image)-height, height):
-            for col in range(0, len(board.source_image[0])-width, width):
-                self.placed_coords.append((row, col))
-        self.scorings = list()
-        for img in (t._image for t in board.tiles):
-            medians = list()
-            for quad in quadrant_histogram(img._data):
-                medians.append(find_median(quad))
-            self.scorings.append(medians)
-        self.source_image_scorings = dict()
-        for row, col in self.placed_coords:
-            medians = list()
-            for quad in quadrant_histogram(board.source_image, offsets=(row, col, row+height, col+height)):
-                medians.append(find_median(quad))
-            self.source_image_scorings[(row,col)] = medians
+        self.cached_board_scores = dict()
+        self.cached_image_scores = dict()
+        self.cached_image_overlay_scores = [dict() for _ in range(self.number_images)]
 
-    def __init2__(self, board, width, height, timer):
-        self.board = board
-        self.width, self.height = width, height
-        self.image_board_score = defaultdict(dict)
-        self.total_score = 0
-        self._source_image_histogram = dict()
-        self.number_images = len(board.tiles)
-        self.placed_coords = list()
-        self.total_score = 0
-        self.timer = timer
-        for row in range(0, len(board.source_image)-height, height):
-            for col in range(0, len(board.source_image[0])-width, width):
-                self.placed_coords.append((row, col))
-        lgi('Computing histograms')
-        self._image_histograms = list()
-        for tile in board.tiles:
-            self._image_histograms.append(image_histogram(tile._image._data))
-        lgi('Done computing histograms')
-        #self.histogram_breaks = find_histo_breaks(self._image_histograms, 4)
-        lgi('Histo breaks: %r', self.histogram_breaks)
-        self.image_histograms_breaks = list()
-        self.source_image_histogram_breaks = dict()
-        for histo in self._image_histograms:
-            self.image_histograms_breaks.append(bucketized_histogram(histo, self.histogram_breaks))
-        for row, col in self.placed_coords:
-            raw = image_histogram(board.source_image, offsets=(row, col, row+height, col+height))
-            self.source_image_histogram_breaks[(row, col)] = bucketized_histogram(raw, self.histogram_breaks)
-        self.scorings = list()
-        for img in (t._image for t in board.tiles):
-            medians = list()
-            for quad in quadrant_histogram(img._data):
-                medians.append(find_median(quad))
-            self.scorings.append(medians)
-        self.source_image_scorings = dict()
-        for row, col in self.placed_coords:
-            medians = list()
-            for quad in quadrant_histogram(board.source_image, offsets=(row, col, row+height, col+height)):
-                medians.append(find_median(quad))
-            self.source_image_scorings[(row,col)] = medians
+    def _get_img_score(self, img_id):
+        key = img_id
+        if key in self.cached_image_scores:
+            return self.cached_image_scores[key]
+        medians = list()
+        for quad in quadrant_histogram(self.board.tiles[img_id]._image):
+            medians.append(find_median(quad))
+        self.cached_image_scores[key] = medians
+        return medians
 
-    def _get_score(self, img_id):
-        key = self.board.coord(img_id)
-        if key[0] == -1:
+    def _get_board_score(self, row, col, width, height):
+        key = row, col, width, height
+        if key in self.cached_board_scores:
+            return self.cached_board_scores[key]
+        medians = list()
+        for quad in quadrant_histogram(self.board.source_image, offsets=(row, col, row+height, col+width)):
+            medians.append(find_median(quad))
+        self.cached_board_scores[key] = medians
+        return medians
+
+    def _get_score(self, img_id, width, height):
+        row, col = self.board.coord(img_id)
+        if row == -1:
             return SCORE_UNPLACED
-        if key in self.image_board_score:
-            if img_id in self.image_board_score[key]:
-                return self.image_board_score[key][img_id]
-        #overall_histogram = self.source_image_histogram_breaks[key]
-        tot = 0
-        #for a, b in zip(overall_histogram, self.image_histograms_breaks[img_id]):
-        #    tot += math.pow(a-b, 2)
-        #tot = math.sqrt(tot)
+        d = self.cached_image_overlay_scores[img_id]
+        key = row, col, width, height
+        if key in d:
+            return d[key]
         scorings_diff = 0
-        for a, b in zip(self.source_image_scorings[key], self.scorings[img_id]):
+        for a, b in zip(self._get_board_score(key[0], key[1], width, height), self._get_img_score(img_id)):
             scorings_diff += (a-b)**2
-        #scorings_diff /= 100000.
-        #lgi('Tot: %r, scorings diff: %r', tot, scorings_diff)
-        tot += scorings_diff
-        self.image_board_score[key][img_id] = tot
-        return tot
+        d[key] = scorings_diff
+        return scorings_diff
 
-    def _check_swap(self, img1, img2):
-        score1_pre, score2_pre = self._get_score(img1), self._get_score(img2)
+    def _check_swap(self, img1, img2, width, height):
+        score1_pre, score2_pre = self._get_score(img1, width, height), self._get_score(img2, width, height)
         img1_coord, img2_coord = self.board.coord(img1), self.board.coord(img2)
         self.board.swap(img1, img2)
-        score1_post, score2_post = self._get_score(img1), self._get_score(img2)
+        score1_post, score2_post = self._get_score(img1, width, height), self._get_score(img2, width, height)
         delta_score = (score1_pre + score2_pre) - (score1_post + score2_post)
-        #lgi('Swapped ids %r and %r, pre: (%r,%r), post: (%r,%r) => %r', img1, img2, score1_pre, score2_pre, score1_post, score2_post, delta_score)
+        lgi('Swapped ids %r and %r, pre: (%r,%r), post: (%r,%r) => %r', img1, img2, score1_pre, score2_pre, score1_post, score2_post, delta_score)
         if delta_score > 0:
             # good move, adjust total score
             self.total_score -= delta_score
@@ -496,33 +489,38 @@ class ImageClassifier(object):
             self.board.place(img2, img2_coord[0], img2_coord[1])
             return False
 
-    def match(self):
-        x = list(self.placed_coords)
-        random.shuffle(x)
-        placed_img = set()
-        for row, col in x:
-            best_score, best_img = sys.maxint, None
-            for img in range(self.number_images):
-                if img in placed_img:
-                    continue
-                score = self._get_score(img)
-                if score < best_score:
-                    best_score, best_img = score, img
-            placed_img.add(best_img)
-            self.total_score += best_score
-            self.board.place(best_img, row, col, self.width, self.height, log=True)
-        lgi('initial placement score: %r', self.total_score)
+    def _get_random_placed_coords(self, width, height):
+        placed_coords = list()
+        for row in range(0, len(self.board.source_image)-height, height):
+            for col in range(0, len(self.board.source_image[0])-width, width):
+                placed_coords.append((row, col))
+        random.shuffle(placed_coords)
+        return placed_coords
+
+    def match(self, width, height):
         for t in range(10):
             number_swaps = 0
-            for id1 in range(self.number_images):
-                for id2 in range(self.number_images):
-                    if id1 == id2:
-                        continue
+            ids = _get_random_image_ids(self.number_images)
+            while ids:
+                id1 = ids.pop(0)
+                for row, col in self._get_random_placed_coords(width, height):
                     if self.timer.should_finish():
                         break
-                    if self._check_swap(id1, id2):
+                    tile = self.board.get_tile_at(row, col)
+                    if tile is None:
+                        # should check if this bumps into another piece
+                        self.board.place(id1, row, col, width, height)
+                        # just get them all down first -- watch out as might not do that for all positions
                         number_swaps += 1
                         break
+                    else:
+                        b2 = tile.dim()
+                        if b2[0] == width and b2[1] == height:
+                            # same size, now just check if can swap
+                            if self._check_swap(id1, tile.index, width, height):
+                                number_swaps += 1
+                            continue
+                        # difference in size, for now don't allow.  need to find three other tiles to help out
                 if self.timer.should_finish():
                     break
             lgi('Score in round %r after %d swaps: %r', t, number_swaps, self.total_score)
@@ -531,7 +529,7 @@ class ImageClassifier(object):
                 break
             if number_swaps <= 1:
                 break
-            if t >= 2:
+            if t >= 20:
                 break
         lgi('Final score: %r', self.total_score)
         lgi('Total time: %r', self.timer.delta() / 1000)
@@ -584,10 +582,10 @@ def do_work(source_image, images, timer):
     min_width, min_height = int(min_width/2), int(min_height/2)
     lgi('Min width, height: (%d,%d)', min_width, min_height)
     #scaled_images = [board.place(tile.index, -1, -1, min_width, min_height) for tile in board.tiles]
-    ic = ImageClassifier(board, min_width, min_height, timer)
+    ic = ImageClassifier(board, timer)
     #ic.match()
     #ic.match2(overall_histo, per_image_histo, min_width, min_height)
-    ic.match()
+    ic.match(min_width, min_height)
     free_tiles, ending_col, ending_row = get_free_tiles(board)
     fill_sides(board, free_tiles, ending_col, ending_row)
 
