@@ -4,16 +4,14 @@ import math
 import random
 import datetime
 from operator import itemgetter
+from models import *
+from util import lgi
 
 random.seed(1)
 
-SCORE_UNPLACED = 200000
 MAX_MILLIS = 8 * 1000 * 1000
 
 
-def lgi(msg, *args):
-    print >>sys.stderr, msg % args
-    sys.stderr.flush()
 
 
 def get_slice(data, col_offset, row_offset, width, height):
@@ -26,201 +24,6 @@ def get_slice(data, col_offset, row_offset, width, height):
     return ret
 
 
-class Board(object):
-    def __init__(self, source_image, images):
-        self.source_image = source_image
-        self.source_breaks = dict()
-        self.tiles = list()
-        for image in images:
-            self.tiles.append(Tile(image))
-        lgi('First tile out of %d: %r', len(self.tiles), self.tiles[0])
-
-    def get_tile_at(self, row, col):
-        # make more efficient l8r
-        for t in self.tiles:
-            d = t.coord()
-            if d[0] == row and d[1] == col:
-                return t
-        return None
-
-    def get_hits(self, row, col, width, height):
-        # box: return self._top_row, self._top_col, self._top_row+self._height-1, self._top_col+self._width-1
-        bottom_row, right_col = row + height-1, col+width-1
-        for t in self.tiles:
-            b = t.box()
-            if b[0] == -1:
-                continue
-            if b[0] > bottom_row:
-                continue
-            if b[1] > right_col:
-                continue
-            if b[2] < row:
-                continue
-            if b[3] < col:
-                continue
-            yield t.index
-
-    def threshold_scoring(self, width, height, thresholds, offset_col=0, offset_row=0):
-        if type(thresholds) == int:
-            thresholds = [thresholds, ]
-        ret = list()
-        for row in range(offset_row, self.source_image.height, height):
-            if row + height >= self.source_image.height:
-                continue
-            lgi('Row %d => %d', row, row+height)
-            for col in range(offset_col, self.source_image.width, width):
-                if col + width >= self.source_image.width:
-                    continue
-                key = '%d,%d:%d,%d' % (col, row, width, height)
-                if not key in self.source_breaks:
-                    self.source_breaks[key] = Image(10000+row*self.source_image.width+col, get_slice(self.source_image, col, row, width, height))
-                img = self.source_breaks[key]
-                scores = img.threshold_scoring(thresholds)
-                ret.append((col, row, scores))
-        return ret
-
-    def score(self, tile_pos):
-        tile = self.tiles[tile_pos]
-        data = tile.data()
-        if data is None:
-            return -1
-        s = 0
-        offset_row, offset_col = tile._top_row, tile._top_col
-        for r in range(len(data)):
-            row = data[r]
-            for c, val in enumerate(row):
-                try:
-                    other_val = self.source_image[offset_row+r][offset_col+c]
-                    s += (other_val-val)*(other_val-val)
-                except IndexError as ex:
-                    lgi('Error with tile %s offset (%d,%d) add (%d,%d) => (%d,%d) : %s',
-                        self.tiles[tile_pos], offset_col, offset_row, c, r, offset_col+c, offset_row+r, ex)
-        return s
-
-    def swap(self, tile_pos1, tile_pos2):
-        tile1, tile2 = self.tiles[tile_pos1], self.tiles[tile_pos2]
-        tile1_pos, tile1_dim = tile1.coord(), tile1.dim()
-        tile2_pos, tile2_dim = tile2.coord(), tile2.dim()
-        self.place(tile_pos1, tile2_pos[0], tile2_pos[1], tile2_dim[0], tile2_dim[1])
-        self.place(tile_pos2, tile1_pos[0], tile1_pos[1], tile1_dim[0], tile1_dim[1])
-
-    def place(self, tile_pos, top_row, top_col, width=None, height=None, log=False, do_check=True):
-        try:
-            tile = self.tiles[tile_pos]
-        except:
-            raise Exception('Asking for tile_pos %r in array size %r' % (tile_pos, len(self.tiles)))
-        prev = repr(tile)
-        tile.move(top_row, top_col)
-        if width is not None:
-            tile.resize(width, height)
-        if log:
-            lgi('Changed tile %r to %r', prev, tile)
-        if do_check:
-            box = tile.box()
-            if box[0] != -1:
-                if box[0] < 0 or box[1] < 0:
-                    raise Exception('%r is above or to right of image %r' % (tile, self.source_image))
-                if box[2] >= self.source_image.height:
-                    raise Exception('%r is below %r' % (tile, self.source_image))
-                if box[3] >= self.source_image.width:
-                    raise Exception('%r is to right of %r' % (tile, self.source_image))
-        return tile.dim()
-
-    def as_ary(self):
-        ret = list()
-        for tile in self.tiles:
-            ret.extend(tile.box())
-        return ret
-
-    def dim(self, tile_id):
-        return self.tiles[tile_id].dim()
-
-    def coord(self, tile_id):
-        return self.tiles[tile_id].coord()
-
-    def row_count(self):
-        # should make more efficient
-        c = set()
-        for tile in self.tiles:
-            c.add(tile._top_row)
-        return len(c)
-
-
-class Tile(object):
-    """An image with a position and a scaled size
-    """
-    def __init__(self, image, top_row=-1, top_col=-1, width=-1, height=-1):
-        self.index = image.index
-        self._image = image
-        self._top_col, self._top_row = top_col, top_row
-        self._width, self._height = width, height
-        self.resize(width, height)
-
-    def move(self, top_row, top_col):
-        self._top_col, self._top_row = top_col, top_row
-
-    def resize(self, width, height):
-        if width < -1:
-            raise Exception('Width should not be less than -1: %d' % (width, ))
-        if height < -1:
-            raise Exception('Height should not be less than -1: %d' % (height, ))
-        if width >= self._image.width:
-            lgi('Asked to make width larger (%d) than original width (%d).  Setting to max', width, self._image.width)
-            self._width = self._image.width
-        else:
-            self._width = width
-        if height >= self._image.height:
-            lgi('Asked to make height larger (%d) than original height (%d).  Setting to max', height, self._image.height)
-            self._height = self._image.height
-        else:
-            self._height = height
-        return self._width, self._height
-
-    def placed(self):
-        return self._width != -1 and self._top_col != -1
-
-    def box(self):
-        if self.placed():
-            return self._top_row, self._top_col, self._top_row+self._height-1, self._top_col+self._width-1
-        else:
-            return -1, -1, -1, -1
-
-    def dim(self):
-        return self._width, self._height
-
-    def coord(self):
-        return self._top_row, self._top_col
-
-    def __repr__(self):
-        return '<Tile: %d %r dim %r size %r>' % (self.index, self._image, self.box(), self.dim())
-
-
-class Image(object):
-    """image colors are [0,255] inclusive
-    """
-    def __init__(self, index, data, sub_title=None):
-        if type(index) is not int:
-            raise Exception('Index (%r) should be an int, not %s' % (index, type(index)))
-        self.index = index
-        self._data = data
-        self.width, self.height = len(self._data[0]), len(self._data)
-        self.sub_title = sub_title
-
-    def __getitem__(self, item):
-        try:
-            return self._data[item]
-        except IndexError as ex:
-            raise Exception('Cannot get item %d out of data of size %d : %s' % (item, len(self.data), ex))
-
-    def __len__(self):
-        return self.height
-
-    def __repr__(self):
-        if self.sub_title is None:
-            img_id = self.index
-        else:
-            img_id = '%s_%s' % (self.index, self.sub_title)
-        return '<image:%s %dx%d>' % (img_id, self.width, self.height)
 
 
 def _get_min_width_and_height(images):
@@ -316,6 +119,7 @@ def find_medians(data, offsets=None, dim=(3, 3)):
         col_start, col_end = 0, len(data[0])
     delta_col = 1.0 * (col_end-col_start) / dim[0]
     delta_row = 1.0 * (row_end-row_start) / dim[1]
+    lgi('Delta row: %r, delta col: %r for size (%d,%d)', delta_row, delta_col, col_end-col_start, row_end-row_start)
     ret = list()
     top_row = 0
     for top_row_pos in range(dim[1]):
@@ -328,12 +132,23 @@ def find_medians(data, offsets=None, dim=(3, 3)):
             row = top_row
             while row < (top_row+delta_row):
                 col = top_col
+                row_int = int(row)
+                if row_int >= len(data):
+                    lgi('Breaking with row %d', row_int)
+                    break
                 while col < (top_col+delta_col):
-                    t += data[int(row)][int(col)]
+                    col_int = int(col)
+                    if col_int >= len(data[0]):
+                        lgi('Breaking with col %d', col_int)
+                        break
+                    t += data[row_int][col_int]
                     c += 1
                     col += 1
                 row += 1
-            need_col = False
+                need_number_cols = False
+            if c == 0:
+                lgi('no data for row %r col %r', row, col)
+                break
             avg = 1.0*t/c
             space_vals.append(int(avg))
             top_col += delta_col
@@ -429,17 +244,6 @@ def _get_random_image_ids(number):
     random.shuffle(ids)
     return ids
 
-
-class MyTimer(object):
-    def __init__(self):
-        self.start_time = datetime.datetime.now()
-
-    def delta(self):
-        dt = datetime.datetime.now() - self.start_time
-        return 1000*1000*dt.seconds + dt.microseconds
-
-    def should_finish(self):
-        return self.delta() > MAX_MILLIS
 
 
 def bucketized_histogram(histogram, breaks):
@@ -609,11 +413,10 @@ def find_histo_breaks(img_histos, number_breaks):
 def do_work(source_image, images, timer):
     #overall_histo, per_image_histo = bucketize_histograms(images)
     #lgi('x: %r', overall_histo)
-    find_medians(source_image.)
-    for img in images:
-        lgi('Img: %r has medians: %r', img, find_medians(img._data))
-    sys.exit(1)
+    lgi('Source image: %r', source_image)
     board = Board(source_image, images)
+    TiledBoard(board, 21, 11)
+    sys.exit(1)
     min_width, min_height = _get_min_width_and_height(images)
     min_width = 2 * (min_width / 2)
     min_height = 2 * (min_height / 2)
@@ -670,22 +473,12 @@ def do_check(ret, images):
                 row[c] = piece
 
 
-class TiledBoard(object):
-    def __init__(self, board, number_width, number_height):
-        width_pixels = board.source_image.width / number_width
-        offset_col = (board.source_image.width - number_width*width_pixels)/2
-        height_pixels = board.source_image.height / number_height
-        offset_row = (board.source_image.height - number_height*height_pixels)/2
-        self.medians = find_medians(board.source_image._data, offsets=(offset_col, offset_row), dim=(number_width, number_height))
-
-
-
 class CollageMaker(object):
     def __init__(self):
         pass
 
     def compose(self, image_collection):
-        timer = MyTimer()
+        timer = MyTimer(MAX_MILLIS)
         source_image, images = make_images(image_collection)
         lgi('Source image %s', source_image)
         ret = do_work(source_image, images, timer)
